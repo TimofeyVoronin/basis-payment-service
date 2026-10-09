@@ -167,14 +167,21 @@ async def test_repeated_post_keeps_original_payment_and_single_event(
 
 @pytest.mark.parametrize(
     ("field", "value"),
-    [("amount", "0.00"), ("currency", "BTC"), ("webhook_url", "ftp://example.org/webhook")],
+    [
+        ("amount", "0.00"),
+        ("currency", "BTC"),
+        ("webhook_url", "ftp://example.org/webhook"),
+        ("description", "invalid\x00text"),
+        ("metadata", {"nested": ["invalid\x00text"]}),
+        ("metadata", {"invalid\x00key": "value"}),
+    ],
 )
 async def test_invalid_body_returns_422_without_creating_payment(
     api_client: httpx.AsyncClient,
     db_sessions: async_sessionmaker[AsyncSession],
     payment_body: dict[str, Any],
     field: str,
-    value: str,
+    value: Any,
 ) -> None:
     response = await api_client.post(
         "/api/v1/payments",

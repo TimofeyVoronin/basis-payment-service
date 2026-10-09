@@ -3,7 +3,7 @@ from decimal import Decimal
 from typing import Any
 from uuid import UUID
 
-from pydantic import AnyHttpUrl, BaseModel, ConfigDict, Field
+from pydantic import AnyHttpUrl, BaseModel, ConfigDict, Field, field_validator
 
 from app.enums import Currency, PaymentStatus
 
@@ -18,6 +18,25 @@ class PaymentCreate(BaseModel):
     description: str
     metadata: dict[str, Any]
     webhook_url: AnyHttpUrl
+
+    @field_validator("description", "metadata")
+    @classmethod
+    def reject_null_character(cls, value: Any) -> Any:
+        """Отклонить U+0000, который PostgreSQL не сохраняет в строках и JSONB."""
+
+        def check(item: Any) -> None:
+            if isinstance(item, str) and "\x00" in item:
+                raise ValueError("Null character U+0000 is not supported")
+            if isinstance(item, dict):
+                for key, nested in item.items():
+                    check(key)
+                    check(nested)
+            elif isinstance(item, list):
+                for nested in item:
+                    check(nested)
+
+        check(value)
+        return value
 
 
 class PaymentCreated(BaseModel):
