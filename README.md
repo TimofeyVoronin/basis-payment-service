@@ -1,12 +1,12 @@
 # Сервис обработки платежей
 
-API принимает платёж, consumer обрабатывает его через RabbitMQ и отправляет результат
-на webhook клиента. Стек: FastAPI, Pydantic v2, SQLAlchemy 2.0 async, PostgreSQL,
-RabbitMQ, FastStream, Alembic и Docker Compose.
+API принимает платёж. Обработчик (`consumer`) читает события RabbitMQ, обрабатывает платежи и отправляет клиенту HTTP-запросы (webhook).
+
+Стек: FastAPI, Pydantic v2, SQLAlchemy 2.0 async, PostgreSQL, RabbitMQ, FastStream, Alembic, Docker Compose.
 
 ## Запуск
 
-Нужен Docker с Compose v2. Из корня проекта:
+Установите Docker с Compose v2. Из корня проекта выполните:
 
 ```bash
 cp .env.example .env
@@ -14,29 +14,25 @@ docker compose up -d --build --wait
 docker compose ps
 ```
 
-Запускаются четыре сервиса: `postgres`, `rabbitmq`, `api`, `consumer`.
-API автоматически применяет миграции; consumer запускается после готовности API и RabbitMQ.
-Публикация Outbox работает в процессе consumer, отдельный сервис для неё не нужен.
+Compose запускает `postgres`, `rabbitmq`, `api` и `consumer`. API применяет миграции при запуске.
+Обработчик ждёт готовности API и RabbitMQ. Он также публикует события из таблицы `outbox`.
 
-API доступно на `http://127.0.0.1:8001`, RabbitMQ Management — на
-`http://127.0.0.1:15672`. Демонстрационные логин и пароль RabbitMQ: `payments`.
-PostgreSQL доступен на порту `55433`; пользователь, пароль и база — `payments`.
-В Compose адреса подключения заданы именами сервисов, а `API_KEY` берётся из `.env`.
-Локальные настройки `.env` исключены из Git.
+| Компонент | Адрес |
+| --- | --- |
+| API | `http://127.0.0.1:8001` |
+| RabbitMQ Management | `http://127.0.0.1:15672` |
+| PostgreSQL | `127.0.0.1:55433` |
 
-Логи и остановка:
+Логин и пароль RabbitMQ: `payments`. Пользователь, пароль и база PostgreSQL: `payments`.
+Compose берёт `API_KEY` из `.env`. Файл `.env` исключён из Git.
 
-```bash
-docker compose logs -f api consumer
-docker compose down
-```
+Просмотрите логи командой `docker compose logs -f api consumer`.
+Остановите сервисы командой `docker compose down`.
+Тома Docker сохраняют данные PostgreSQL и RabbitMQ после остановки.
 
-Данные PostgreSQL и RabbitMQ сохраняются в volumes после остановки.
+## Проверка webhook
 
-## Получатель webhook для проверки
-
-Для локального получателя и тестов нужен Python 3.12 или новее.
-В отдельном терминале из корня проекта:
+Установите Python 3.12 или новее. В отдельном терминале из корня проекта выполните:
 
 ```bash
 python3.12 -m venv .venv
@@ -44,20 +40,19 @@ python3.12 -m venv .venv
 .venv/bin/uvicorn scripts.webhook_receiver:app --host 0.0.0.0 --port 9000
 ```
 
-Получатель выводит уведомление в терминал и отвечает `204`.
-В Docker Desktop для macOS/Windows адрес получателя из контейнера:
-`http://host.docker.internal:9000/webhook`. На Linux укажите адрес получателя,
-доступный из контейнера. Если consumer запущен на компьютере, используйте `localhost:9000`.
+Получатель выводит тело webhook в терминал и возвращает `204`.
+На macOS и Windows с Docker Desktop используйте `http://host.docker.internal:9000/webhook`.
+На Linux укажите адрес, доступный из контейнера. Для обработчика вне Docker используйте `http://localhost:9000/webhook`.
 
-ТЗ не задаёт тело webhook. В реализации выбраны `payment_id`, итоговый `status`
-и `processed_at` в UTC. Успешным считается ответ получателя с кодом `2xx`.
+Webhook содержит `payment_id`, `status` и `processed_at` в UTC.
+Обработчик считает ответ `2xx` успешной доставкой.
 
 ## API
 
-Все запросы требуют `X-API-Key`. Ниже используется значение из `.env.example`;
-если изменили `API_KEY`, подставьте своё. Отсутствующий или неверный ключ даёт `401`.
+Передавайте `X-API-Key` в каждом запросе. Отсутствующий или неверный ключ вызывает ответ `401`.
+Если изменили `API_KEY`, замените ключ в примерах.
 
-Создание платежа:
+### Создать платёж
 
 ```bash
 curl -i http://127.0.0.1:8001/api/v1/payments \
@@ -73,72 +68,76 @@ curl -i http://127.0.0.1:8001/api/v1/payments \
   }'
 ```
 
-Все пять полей обязательны. Сумма положительная, до 16 цифр до запятой и двух после;
-валюты — `RUB`, `USD`, `EUR`; `metadata` — JSON-объект; `webhook_url` — HTTP или HTTPS.
-`Idempotency-Key` обязателен, длина от 1 до 255 символов. Ошибки входных данных дают `422`.
-Ответ `202 Accepted` содержит `payment_id`, `status` и `created_at`.
+Все пять полей обязательны:
 
-Подставьте `payment_id` из ответа, чтобы получить состояние платежа:
+| Поле | Требование |
+| --- | --- |
+| `amount` | Положительная сумма. До 16 цифр до десятичной точки и до двух после неё. |
+| `currency` | `RUB`, `USD` или `EUR` |
+| `description` | Строка |
+| `metadata` | JSON-объект |
+| `webhook_url` | Адрес HTTP или HTTPS |
+
+Передавайте `Idempotency-Key` длиной от 1 до 255 символов.
+API возвращает `202 Accepted` с полями `payment_id`, `status` и `created_at`. Ошибки входных данных вызывают ответ `422`.
+Повторный запрос с тем же ключом возвращает первый платёж. Это правило действует при изменённом теле и одновременных запросах.
+
+### Получить платёж
+
+Замените `UUID_ИЗ_ОТВЕТА` значением `payment_id` из ответа. Выполните запрос:
 
 ```bash
 curl -i http://127.0.0.1:8001/api/v1/payments/UUID_ИЗ_ОТВЕТА \
   -H 'X-API-Key: local-development-key'
 ```
 
-GET возвращает `200` и все данные платежа, `404` для неизвестного UUID,
-`422` для некорректного UUID. Сумма в JSON-ответе передаётся строкой, например `"1500.25"`.
-Статусы: `pending`, `succeeded`, `failed`. Страницы Swagger/ReDoc и `/openapi.json` отключены.
+API возвращает `200` с данными платежа, `404` для неизвестного UUID или `422` для некорректного UUID.
+API передаёт сумму строкой, например `"1500.25"`. Статусы платежа: `pending`, `succeeded`, `failed`.
+Swagger, ReDoc и `/openapi.json` отключены.
 
 ## Обработка и доставка
 
-- Платёж и событие Outbox сохраняются одной транзакцией. Повторный ключ возвращает
-  первый платёж, сохраняя его данные, даже при изменённом теле или одновременных запросах.
-- Relay отправляет постоянные сообщения в durable-очередь `payments.new` через стандартный
-  exchange. Отметка публикации ставится после подтверждения RabbitMQ; при ошибке событие
-  остаётся для повтора. Повторная отправка использует тот же `message_id`.
-- Один consumer с `prefetch_count=1` эмулирует шлюз: задержка 2–5 секунд, 90% `succeeded`
-  и 10% `failed`. Результат сохраняется до отправки webhook. Дубликат события не запускает
-  шлюз повторно; ошибка уведомления не меняет результат платежа.
-- Webhook имеет максимум три попытки с таймаутом 5 секунд; после ошибок — паузы 2 и 4 секунды.
-  Счётчик, время повтора и отметка успеха хранятся в PostgreSQL, поэтому перезапуск не обнуляет
-  лимит. Попытка фиксируется до HTTP: остановка между записью и отправкой расходует её.
-- После третьей ошибки сообщение публикуется в durable-очередь `payments.dlq` с заголовками
-  `attempts` и `error_type`. Исходное сообщение подтверждается после доставки webhook или
-  подтверждённой публикации в DLQ. Отказ DLQ вызывает повтор переноса без четвёртого webhook.
-  Некорректные события и неизвестные платежи также проходят три проверки перед DLQ.
+1. API сохраняет платёж и событие в `outbox` одной транзакцией.
+2. Обработчик публикует сообщение в очередь `payments.new`. RabbitMQ сохраняет очереди и сообщения на диске.
+   После подтверждения RabbitMQ обработчик отмечает событие как опубликованное. При ошибке он повторяет публикацию с тем же `message_id`.
+3. Один обработчик эмулирует шлюз: задержка 2–5 секунд, вероятность `succeeded` — 90%, `failed` — 10%.
+   Он сохраняет результат до отправки webhook. Дубликат не запускает шлюз повторно. Ошибка webhook не меняет результат платежа.
+4. Обработчик отправляет webhook с таймаутом 5 секунд. Лимит: три попытки с паузами 2 и 4 секунды после ошибок.
+   PostgreSQL хранит счётчик, время повтора и отметку доставки. Перезапуск не обнуляет лимит.
+   Обработчик записывает попытку до HTTP-запроса. Остановка между записью и отправкой расходует попытку.
+5. После исчерпания лимита попыток обработчик публикует сообщение в очередь `payments.dlq`.
+   Некорректные события и неизвестные платежи также проходят три проверки перед переносом.
+   Обработчик подтверждает исходное сообщение после доставки webhook или подтверждения публикации в `payments.dlq`.
+   Если публикация не удалась, обработчик повторяет перенос без четвёртой попытки webhook.
 
-Доставка допускает дубликаты: обрыв после отправки в RabbitMQ или принятия webhook,
-но до сохранения отметки в БД, может привести к повтору. Получателю следует обрабатывать
-уведомления идемпотентно по `payment_id`.
+Обрыв после публикации в RabbitMQ или доставки webhook, но до отметки в PostgreSQL, может вызвать повторную отправку.
+Получатель должен исключать повторную обработку webhook по `payment_id`.
 
 ## Миграции и тесты
 
-В Docker миграции выполняются при запуске API. Для запуска приложения локально настройки
-берутся из `.env`, а схема обновляется командой `.venv/bin/alembic upgrade head`.
-`0001` создаёт `payments` и `outbox`, `0002` добавляет состояние доставки webhook.
+Миграция `0001` создаёт таблицы `payments` и `outbox`. Миграция `0002` добавляет поля доставки webhook.
+Для локального запуска используйте настройки `.env` и выполните `.venv/bin/alembic upgrade head`.
 
-После установки группы `dev`:
+После установки зависимостей `dev` выполните проверки без PostgreSQL:
 
 ```bash
 .venv/bin/ruff check .
 .venv/bin/ruff format --check .
 .venv/bin/python -m pytest tests -m 'not integration' -q
+```
+
+Запустите PostgreSQL и выполните все тесты:
+
+```bash
 docker compose up -d --wait postgres
 .venv/bin/python -m pytest tests -q
 ```
 
-Интеграционные тесты проверяют API, транзакции, идемпотентность, Outbox и повторы webhook
-на настоящем PostgreSQL; HTTP и подтверждения RabbitMQ в этих тестах подменяются.
-Каждый тест создаёт отдельную базу `test_payments_<uuid>` и удаляет её после завершения.
-По умолчанию используется сервер Compose на порту `55433`. Другой сервер можно задать
-переменной окружения `TEST_DATABASE_URL`; роль подключения должна иметь право создавать БД.
+Интеграционные тесты используют PostgreSQL. Тесты подменяют HTTP-запросы и подтверждения RabbitMQ.
+Каждый интеграционный тест создаёт базу `test_payments_<uuid>` и удаляет её после завершения.
+По умолчанию тесты используют PostgreSQL из Compose на порту `55433`.
+Для другого сервера задайте `TEST_DATABASE_URL`. Пользователь подключения должен иметь право создавать базы.
 
 ## Официальная документация
 
-[FastAPI](https://fastapi.tiangolo.com/),
-[Pydantic](https://docs.pydantic.dev/latest/),
-[SQLAlchemy async](https://docs.sqlalchemy.org/en/20/orm/extensions/asyncio.html),
-[RabbitMQ confirms](https://www.rabbitmq.com/docs/confirms),
-[FastStream](https://faststream.ag2.ai/latest/),
-[Alembic async](https://alembic.sqlalchemy.org/en/latest/cookbook.html#using-asyncio-with-alembic),
-[Docker Compose](https://docs.docker.com/compose/how-tos/startup-order/).
+[FastAPI](https://fastapi.tiangolo.com/), [Pydantic](https://docs.pydantic.dev/latest/), [SQLAlchemy async](https://docs.sqlalchemy.org/en/20/orm/extensions/asyncio.html), [RabbitMQ confirms](https://www.rabbitmq.com/docs/confirms), [FastStream](https://faststream.ag2.ai/latest/), [Alembic async](https://alembic.sqlalchemy.org/en/latest/cookbook.html#using-asyncio-with-alembic), [Docker Compose](https://docs.docker.com/compose/how-tos/startup-order/).
